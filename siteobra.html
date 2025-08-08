@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RDO - Diário de Obra</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    .thumb { height: 96px; width: auto; object-fit: cover; border-radius: .375rem; }
+  </style>
+</head>
+<div id="imgModal" class="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-50 hidden">
+  <span id="closeModal" class="absolute top-4 right-6 text-white text-3xl cursor-pointer">&times;</span>
+  <img id="modalImage" class="max-w-full max-h-full rounded shadow-lg" src="">
+</div>
+
+<script>
+  function renderGallery(pav) {
+    const gallery = document.getElementById('gallery');
+    gallery.innerHTML = '';
+    if (!pav || !pav.images || !pav.images.length) {
+      gallery.innerHTML = '<div class="text-xs text-gray-400">Sem fotos</div>';
+      return;
+    }
+    pav.images.forEach(src => {
+      const img = document.createElement('img');
+      img.src = src;
+      img.className = 'thumb cursor-pointer';
+      img.addEventListener('click', () => openModal(src));
+      gallery.appendChild(img);
+    });
+  }
+
+  function openModal(src) {
+    document.getElementById('modalImage').src = src;
+    document.getElementById('imgModal').classList.remove('hidden');
+  }
+
+  document.getElementById('closeModal').addEventListener('click', () => {
+    document.getElementById('imgModal').classList.add('hidden');
+  });
+
+  // Fecha o modal se clicar fora da imagem
+  document.getElementById('imgModal').addEventListener('click', (e) => {
+    if (e.target.id === 'imgModal') {
+      document.getElementById('imgModal').classList.add('hidden');
+    }
+  });
+</script>
+<body class="bg-gray-50 text-gray-800">
+  <div class="min-h-screen flex">
+    <aside class="w-72 bg-white border-r p-4">
+      <h1 class="text-xl font-bold mb-6">Kairós Empreiteira</h1>
+      <nav id="pavList" class="space-y-2"></nav>
+      <div class="mt-6">
+        <h2 class="text-sm font-semibold text-gray-600">Progresso Geral</h2>
+        <canvas id="overallChart" height="150"></canvas>
+      </div>
+    </aside>
+
+    <main class="flex-1 p-6">
+      <header class="mb-6">
+        <h2 id="obraTitulo" class="text-2xl font-bold"></h2>
+        <p id="dataTitulo" class="text-sm text-gray-500"></p>
+      </header>
+
+      <section id="contentArea" class="bg-white p-6 rounded shadow">
+        <div id="errorBox" class="hidden text-red-600 mb-4"></div>
+
+        <div id="emptyState" class="text-center text-gray-500 py-20">Selecione um pavimento para ver as informações.</div>
+
+        <div id="pavimentoContent" class="hidden">
+          <div class="md:flex md:gap-6">
+            <div class="md:flex-1">
+              <h3 id="pavNome" class="text-xl font-semibold mb-4"></h3>
+              <p id="pavDesc" class="mb-4 text-gray-700"></p>
+
+              <div class="mb-4">
+                <h4 class="text-sm font-semibold mb-2">Serviço realizado</h4>
+                <p id="pavServico" class="text-gray-700"></p>
+              </div>
+
+              <div class="mb-4 flex gap-4 text-sm text-gray-600">
+                <div><strong>Início:</strong> <span id="pavDataInicio"></span></div>
+                <div><strong>Entrega:</strong> <span id="pavDataEntrega"></span></div>
+              </div>
+
+              <div class="mb-4">
+                <h4 class="text-sm font-semibold mb-2">Fotos</h4>
+                <div id="gallery" class="grid grid-cols-3 gap-2 overflow-auto" style="max-height:240px;"></div>
+              </div>
+            </div>
+
+            <aside class="md:w-80 mt-6 md:mt-0">
+              <canvas id="pavChart" height="200"></canvas>
+            </aside>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    // Estado canonical usado pela UI
+    let state = { obraNome: '', rdoData: '', pavimentos: [] };
+    let selectedPavId = null;
+    let overallChart = null;
+    let pavChart = null;
+
+    // Carrega dados e tenta mapear diferentes formatos
+    (async function loadData() {
+      try {
+        const res = await fetch('dados.json', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const raw = await res.json();
+        state = mapToCanonical(raw);
+        if (!state.pavimentos || !state.pavimentos.length) {
+          showError('Arquivo dados.json carregado, mas não contém pavimentos válidos.');
+          return;
+        }
+        renderHeader();
+        renderPavList();
+        initOverallChart();
+        // seleciona primeiro pavimento automaticamente
+        selectPav(state.pavimentos[0].id);
+      } catch (err) {
+        console.error(err);
+        showError('Erro ao carregar dados.json: ' + err.message + '. Se estiver abrindo via file://, rode um servidor local (veja instruções abaixo).');
+      }
+    })();
+
+    function showError(msg) {
+      const el = document.getElementById('errorBox');
+      el.innerText = msg;
+      el.classList.remove('hidden');
+    }
+
+    // Mapeia vários formatos possíveis para o formato esperado pela UI:
+    // canonical: { obraNome, rdoData, pavimentos: [{id,nome,percent,images,desc,servico,dataInicio,dataEntrega}] }
+    function mapToCanonical(d) {
+      const out = { obraNome: '', rdoData: '', pavimentos: [] };
+
+      // obraNome / rdoData (aceita varias chaves)
+      out.obraNome = d.obraNome || d.titulo || (d.obra && (d.obra.nome || d.obraNome)) || '';
+      out.rdoData = d.rdoData || d.data || (d.obra && d.obra.data) || '';
+
+      // pavimentos array - pode vir como d.pavimentos ou d.pavs etc.
+      const possibleArrays = d.pavimentos || d.pavs || d.andar || d.andamentos || d.floors || [];
+      const arr = Array.isArray(possibleArrays) ? possibleArrays : (Array.isArray(d.pavimentos) ? d.pavimentos : []);
+
+      // Se não encontrou em 'pavimentos', tenta detectar qualquer array dentro do objeto que pareça pavimentos
+      let sourceArray = arr;
+      if (!sourceArray.length) {
+        for (const k in d) {
+          if (Array.isArray(d[k]) && d[k].length && (d[k][0].nome || d[k][0].name || d[k][0].progresso || d[k][0].fotos)) {
+            sourceArray = d[k];
+            break;
+          }
+        }
+      }
+
+      out.pavimentos = (sourceArray || []).map((p, idx) => {
+        const id = p.id || ('p' + (p.nome ? p.nome.replace(/\s+/g, '_') : idx) + '_' + Math.random().toString(36).slice(2,6));
+        const nome = p.nome || p.title || p.name || `Pavimento ${idx+1}`;
+        const percent = Number(p.percent ?? p.progresso ?? p.porcentagem ?? p.procentage ?? p.percentage ?? 0) || 0;
+        const images = Array.isArray(p.images) ? p.images : (Array.isArray(p.fotos) ? p.fotos : []);
+        const desc = p.desc || p.descricao || p.description || '';
+        const servico = p.servico || p.serviço || '';
+        const dataInicio = p.dataInicio || p.inicio || '';
+        const dataEntrega = p.dataEntrega || p.entrega || '';
+
+        return { id, nome, percent, images, desc, servico, dataInicio, dataEntrega };
+      });
+
+      return out;
+    }
+
+    function renderHeader() {
+      document.getElementById('obraTitulo').innerText = state.obraNome ? `RDO — ${state.obraNome}` : 'RDO — (sem título)';
+      document.getElementById('dataTitulo').innerText = state.rdoData ? `Data: ${state.rdoData}` : '';
+    }
+
+    function renderPavList() {
+      const list = document.getElementById('pavList');
+      list.innerHTML = '';
+      state.pavimentos.forEach(p => {
+        const btn = document.createElement('button');
+        btn.className = `w-full text-left px-3 py-2 rounded hover:bg-gray-100 flex justify-between items-center ${selectedPavId===p.id? 'bg-gray-100':''}`;
+        btn.innerHTML = `<div><div class="font-medium">${p.nome}</div><div class="text-xs text-gray-500">${p.percent}% concluído</div></div>`;
+        btn.addEventListener('click', () => selectPav(p.id));
+        list.appendChild(btn);
+      });
+    }
+
+    function selectPav(id) {
+      const pav = state.pavimentos.find(x => x.id === id);
+      if (!pav) return;
+      selectedPavId = id;
+      document.getElementById('emptyState').classList.add('hidden');
+      document.getElementById('pavimentoContent').classList.remove('hidden');
+      document.getElementById('pavNome').innerText = pav.nome;
+      document.getElementById('pavDesc').innerText = pav.desc || '';
+
+      // NOVOS CAMPOS
+      document.getElementById('pavServico').innerText = pav.servico || 'Não informado';
+      document.getElementById('pavDataInicio').innerText = pav.dataInicio || '-';
+      document.getElementById('pavDataEntrega').innerText = pav.dataEntrega || '-';
+
+      renderGallery(pav);
+      updatePavChart(pav);
+      renderPavList();
+    }
+
+    function renderGallery(pav) {
+      const gallery = document.getElementById('gallery');
+      gallery.innerHTML = '';
+      if (!pav || !pav.images || !pav.images.length) {
+        gallery.innerHTML = '<div class="text-xs text-gray-400">Sem fotos</div>';
+        return;
+      }
+      pav.images.forEach(src => {
+        const img = document.createElement('img');
+        img.src = src;
+        img.className = 'thumb cursor-pointer'; // adiciona cursor pointer para indicar clicável
+        img.addEventListener('click', () => openModal(src)); // abre o modal ao clicar
+        gallery.appendChild(img);
+      });
+    }
+
+    function initOverallChart() {
+      const ctx = document.getElementById('overallChart');
+      overallChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: { labels: ['Concluído','Restante'], datasets: [{ data: [0,100], backgroundColor: ['#4F46E5','#E5E7EB'] }] },
+        options: { plugins: { legend: { display: false } }, cutout: '70%' }
+      });
+      updateOverallChart();
+    }
+
+    function updateOverallChart() {
+      const vals = state.pavimentos.map(p=>Number(p.percent||0));
+      const avg = vals.length ? Math.round(vals.reduce((a,b)=>a+b,0)/vals.length) : 0;
+      overallChart.data.datasets[0].data = [avg, 100-avg];
+      overallChart.update();
+    }
+
+    function updatePavChart(pav) {
+      const ctx = document.getElementById('pavChart');
+      if (pavChart) pavChart.destroy();
+      pavChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: { labels: ['Concluído','Restante'], datasets: [{ data: [pav.percent||0, 100-(pav.percent||0)], backgroundColor: ['#059669','#E5E7EB'] }] },
+        options: { plugins: { legend: { display: false } }, cutout: '75%' }
+      });
+    }
+  </script>
+</body>
+</html>
